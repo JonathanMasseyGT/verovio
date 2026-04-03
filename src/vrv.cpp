@@ -27,17 +27,15 @@
 
 //----------------------------------------------------------------------------
 
-// Windows has no Bourne shell (sh), therefore no "git_commit.h" is created.
-#ifndef _WIN32
-#ifdef COCOAPODS
+// Windows and Android have no Bourne shell, so "git_commit.h" is never generated.
+#if defined(_WIN32) || defined(__ANDROID__)
+#define GIT_COMMIT "[undefined]"
+#elif defined(COCOAPODS)
 #define GIT_COMMIT "[cocoapods]"
 #elif defined(SWIFT_PACKAGE)
 #define GIT_COMMIT "[swift-package]"
 #else
 #include "git_commit.h"
-#endif
-#else
-#define GIT_COMMIT "[undefined]"
 #endif
 
 #include "object.h"
