@@ -25,6 +25,8 @@
 #include <numeric>
 #include <limits>
 #include <algorithm>
+#include <charconv>
+#include <cstring>
 
 namespace Tunings
 {
@@ -68,9 +70,7 @@ inline std::istream &getlineEndingIndependent(std::istream &is, std::string &t)
 inline double locale_atof(const char *s)
 {
     double result = 0;
-    std::istringstream istr(s);
-    istr.imbue(std::locale("C"));
-    istr >> result;
+    std::from_chars(s, s + std::strlen(s), result);
     return result;
 }
 
