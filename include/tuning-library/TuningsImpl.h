@@ -28,6 +28,19 @@
 #include <charconv>
 #include <cstring>
 
+// ---------------------------------------------------------------------------
+// No-exceptions compatibility shim.
+// When compiled with -fno-exceptions (or /EHs-c-), __cpp_exceptions is not
+// defined and throw is a hard error.  Map all throws in this file to
+// std::terminate() so the header compiles cleanly in that mode.  In a normal
+// exceptions-enabled build the macro expands to a plain throw.
+// ---------------------------------------------------------------------------
+#if defined(__cpp_exceptions)
+#    define TUNINGS_THROW(x) throw (x)
+#else
+#    define TUNINGS_THROW(x) (std::terminate())
+#endif
+
 namespace Tunings
 {
 // Thank you to: https://gist.github.com/josephwb/df09e3a71679461fc104
@@ -117,7 +130,7 @@ inline Tone toneFromString(const std::string &fullLine, int lineno)
             if (lineno >= 0)
                 s += "Line " + std::to_string(lineno) + ".";
             s += " Line is '" + line + "'.";
-            throw TuningError(s);
+            TUNINGS_THROW(TuningError(s));
         }
         // 2^(cents/1200) = n/d
         // cents = 1200 * log(n/d) / log(2)
@@ -186,7 +199,7 @@ inline Scale readSCLStream(std::istream &inf)
             res.count = atoi(line.c_str());
             if (res.count < 1)
             {
-                throw TuningError("Invalid SCL note count.");
+                TUNINGS_THROW(TuningError("Invalid SCL note count."));
             }
             state = read_note;
             break;
@@ -217,7 +230,7 @@ inline Scale readSCLStream(std::istream &inf)
             oss << "unknown state.";
             break;
         }
-        throw TuningError(oss.str());
+        TUNINGS_THROW(TuningError(oss.str()));
     }
 
     if ((int)res.tones.size() != res.count)
@@ -225,7 +238,7 @@ inline Scale readSCLStream(std::istream &inf)
         std::string s =
             "Read fewer notes than count in file. Count = " + std::to_string(res.count) +
             " notes. Array size = " + std::to_string(res.tones.size());
-        throw TuningError(s);
+        TUNINGS_THROW(TuningError(s));
     }
     res.rawText = rawOSS.str();
     return res;
@@ -260,7 +273,7 @@ inline Scale readSCLFile(const StreamablePath auto &path)
         }
 
         errMsg += "'";
-        throw TuningError(errMsg);
+        TUNINGS_THROW(TuningError(errMsg));
     }
 
     auto res = readSCLStream(inf);
@@ -324,11 +337,11 @@ inline Scale evenTemperament12NoteScale()
 inline Scale evenDivisionOfSpanByM(int Span, int M)
 {
     if (Span <= 0)
-        throw Tunings::TuningError("Span should be a positive number. You entered " +
-                                   std::to_string(Span));
+        TUNINGS_THROW(Tunings::TuningError("Span should be a positive number. You entered " +
+                                   std::to_string(Span)));
     if (M <= 0)
-        throw Tunings::TuningError(
-            "You must divide the period into at least one step. You entered " + std::to_string(M));
+        TUNINGS_THROW(Tunings::TuningError(
+            "You must divide the period into at least one step. You entered " + std::to_string(M)));
 
     std::ostringstream oss;
     oss.imbue(std::locale("C"));
@@ -349,11 +362,11 @@ inline Scale evenDivisionOfSpanByM(int Span, int M)
 inline Scale evenDivisionOfCentsByM(float Cents, int M, const std::string &lastLabel)
 {
     if (Cents <= 0)
-        throw Tunings::TuningError("Cents should be a positive number. You entered " +
-                                   std::to_string(Cents));
+        TUNINGS_THROW(Tunings::TuningError("Cents should be a positive number. You entered " +
+                                   std::to_string(Cents)));
     if (M <= 0)
-        throw Tunings::TuningError(
-            "You must divide the period into at least one step. You entered " + std::to_string(M));
+        TUNINGS_THROW(Tunings::TuningError(
+            "You must divide the period into at least one step. You entered " + std::to_string(M)));
 
     std::ostringstream oss;
     oss.imbue(std::locale("C"));
@@ -425,9 +438,9 @@ inline KeyboardMapping readKBMStream(std::istream &inf)
             }
             if (!validLine)
             {
-                throw TuningError("Invalid line " + std::to_string(lineno) + ". line='" + line +
+                TUNINGS_THROW(TuningError("Invalid line " + std::to_string(lineno) + ". line='" + line +
                                   "'. Bad character is '" + badChar + "/" +
-                                  std::to_string((int)badChar) + "'");
+                                  std::to_string((int)badChar) + "'"));
             }
         }
 
@@ -503,14 +516,14 @@ inline KeyboardMapping readKBMStream(std::istream &inf)
             oss << "unknown state";
             break;
         }
-        throw TuningError(oss.str());
+        TUNINGS_THROW(TuningError(oss.str()));
     }
 
     if ((int)res.keys.size() != res.count)
     {
-        throw TuningError("Different number of keys than mapping file indicates. Count is " +
+        TUNINGS_THROW(TuningError("Different number of keys than mapping file indicates. Count is " +
                           std::to_string(res.count) + " and we parsed " +
-                          std::to_string(res.keys.size()) + " keys.");
+                          std::to_string(res.keys.size()) + " keys."));
     }
 
     res.rawText = rawOSS.str();
@@ -552,7 +565,7 @@ inline KeyboardMapping readKBMFile(const StreamablePath auto &path)
         }
 
         errMsg += "'";
-        throw TuningError(errMsg);
+        TUNINGS_THROW(TuningError(errMsg));
     }
 
     auto res = readKBMStream(inf);
@@ -610,8 +623,8 @@ inline Tuning::Tuning(const Scale &s_, const KeyboardMapping &k_, bool allowTuni
     KeyboardMapping k = k_;
     int oSP = 1;
     if (s.count <= 0)
-        throw TuningError("Unable to tune to a scale with no notes. Your scale provided " +
-                          std::to_string(s.count) + " notes.");
+        TUNINGS_THROW(TuningError("Unable to tune to a scale with no notes. Your scale provided " +
+                          std::to_string(s.count) + " notes."));
 
     int useMiddleNote{k.middleNote};
     if (k.count > 0)
@@ -674,8 +687,8 @@ inline Tuning::Tuning(const Scale &s_, const KeyboardMapping &k_, bool allowTuni
     // smaller than the size of the scale.
     if (k.octaveDegrees > s.count)
     {
-        throw TuningError("Unable to apply mapping of size " + std::to_string(k.octaveDegrees) +
-                          " to smaller scale of size " + std::to_string(s.count));
+        TUNINGS_THROW(TuningError("Unable to apply mapping of size " + std::to_string(k.octaveDegrees) +
+                          " to smaller scale of size " + std::to_string(s.count)));
     }
 
     int posPitch0 = 256 + k.tuningConstantNote;
@@ -703,8 +716,8 @@ inline Tuning::Tuning(const Scale &s_, const KeyboardMapping &k_, bool allowTuni
                  " as " + "the tuning constant note, but that is scale note " +
                  std::to_string(oSP) + " given your scale root of " + std::to_string(k.middleNote) +
                  " which your mapping does not assign. Please set your tuning constant "
-                 "note to a mapped key.";
-            throw TuningError(s);
+                  "note to a mapped key.";
+            TUNINGS_THROW(TuningError(s));
         }
     }
     double tuningCenterPitchOffset;
@@ -808,7 +821,7 @@ inline Tuning::Tuning(const Scale &s_, const KeyboardMapping &k_, bool allowTuni
                          std::to_string(k.middleNote) +
                          " which your mapping does not assign. Please set your tuning constant "
                          "note to a mapped key.";
-                    throw TuningError(s);
+                    TUNINGS_THROW(TuningError(s));
                 }
             }
             scalepositiontable[i] = scalePositionOfTuningNote % s.count;
@@ -880,9 +893,9 @@ inline Tuning::Tuning(const Scale &s_, const KeyboardMapping &k_, bool allowTuni
                 {
                     if (cm > s.count)
                     {
-                        throw TuningError(std::string(
-                            "Mapping KBM note longer than scale; key=" + std::to_string(cm) +
-                            " scale count=" + std::to_string(s.count)));
+                    TUNINGS_THROW(TuningError(std::string(
+                        "Mapping KBM note longer than scale; key=" + std::to_string(cm) +
+                        " scale count=" + std::to_string(s.count))));
                     }
                     push = mappingKey - cm;
                 }
@@ -1002,7 +1015,7 @@ inline int Tuning::midiNoteForNoteName(std::string noteName, int octave) const
     if (it == notationMapping.names.end())
     {
         std::string s = "Invalid note name '" + noteName + "'";
-        throw TuningError(s);
+        TUNINGS_THROW(TuningError(s));
     }
     int scalePosition = positive_mod(static_cast<int>(it - notationMapping.names.begin() + 1), notationMapping.count);
     return std::min(
@@ -1016,7 +1029,7 @@ inline std::string Tuning::noteNameForScalePosition(int scalePosition) const
     if (notationMapping.count == 0)
     {
         std::string s = "No note names found in the tuning.";
-        throw TuningError(s);
+        TUNINGS_THROW(TuningError(s));
     }
     return notationMapping.names.at(positive_mod(scalePosition - 1, notationMapping.count));
 }
@@ -1145,8 +1158,8 @@ inline AbletonScale readASCLStream(std::istream &inf)
             {
                 std::string s = "Invalid NOTE_NAMES entry '" + rawText + "': Expecting " +
                                 std::to_string(as.scale.count) + " entries but received " +
-                                std::to_string(as.notationMapping.count);
-                throw TuningError(s);
+                                 std::to_string(as.notationMapping.count);
+                TUNINGS_THROW(TuningError(s));
             }
         }
         else if (command[1] == "REFERENCE_PITCH")
@@ -1169,7 +1182,7 @@ inline AbletonScale readASCLStream(std::istream &inf)
             else
             {
                 std::string s = "Invalid REFERENCE_PITCH entry '" + rp + "'";
-                throw TuningError(s);
+                TUNINGS_THROW(TuningError(s));
             }
         }
         else if (command[1] == "NOTE_RANGE_BY_FREQUENCY")
@@ -1191,7 +1204,7 @@ inline AbletonScale readASCLStream(std::istream &inf)
         else
         {
             std::string s = "Unhandled Ableton command '" + std::string(command[1]) + "'";
-            throw TuningError(s);
+            TUNINGS_THROW(TuningError(s));
         }
     }
 
@@ -1255,7 +1268,7 @@ inline AbletonScale readASCLFile(std::string fname)
     if (!inf.is_open())
     {
         std::string s = "Unable to open file '" + fname + "'";
-        throw TuningError(s);
+        TUNINGS_THROW(TuningError(s));
     }
 
     auto res = readASCLStream(inf);
@@ -1272,4 +1285,7 @@ inline AbletonScale parseASCLData(const std::string &d)
 }
 
 } // namespace Tunings
+
+#undef TUNINGS_THROW
+
 #endif
