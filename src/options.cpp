@@ -1540,6 +1540,14 @@ Options::Options()
     m_systemMaxPerPage.Init(0, 0, 24);
     this->Register(&m_systemMaxPerPage, "systemMaxPerPage", &m_generalLayout);
 
+    m_maxLinesPerPage.SetInfo("Max. Lines per Page", "Maximum number of lines (systems/rows) per page; 0 to disable");
+    m_maxLinesPerPage.Init(0, 0, 1000);
+    this->Register(&m_maxLinesPerPage, "maxLinesPerPage", &m_generalLayout);
+
+    m_maxMeasuresPerPage.SetInfo("Max. Measures per Page", "Maximum total number of measures per page; 0 to disable");
+    m_maxMeasuresPerPage.Init(0, 0, 10000);
+    this->Register(&m_maxMeasuresPerPage, "maxMeasuresPerPage", &m_generalLayout);
+
     m_textEnclosureThickness.SetInfo("Text box line thickness", "The thickness of the line text enclosing box");
     m_textEnclosureThickness.Init(0.2, 0.10, 0.80);
     this->Register(&m_textEnclosureThickness, "textEnclosureThickness", &m_generalLayout);

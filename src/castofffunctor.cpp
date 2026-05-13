@@ -286,6 +286,7 @@ CastOffPagesFunctor::CastOffPagesFunctor(Page *contentPage, Doc *doc, Page *curr
     m_pgHead2Height = 0;
     m_pgFoot2Height = 0;
     m_leftoverSystem = NULL;
+    m_measuresOnCurrentPage = 0;
 }
 
 FunctorCode CastOffPagesFunctor::VisitPageEnd(Page *page)
@@ -348,8 +349,19 @@ FunctorCode CastOffPagesFunctor::VisitSystem(System *system)
     }
 
     const int systemMaxPerPage = m_doc->GetOptions()->m_systemMaxPerPage.GetValue();
+    const int maxLinesPerPage = m_doc->GetOptions()->m_maxLinesPerPage.GetValue();
+    const int maxMeasuresPerPage = m_doc->GetOptions()->m_maxMeasuresPerPage.GetValue();
     const int systemChildCount = m_currentPage->GetChildCount(SYSTEM);
+    const int measuresInSystem = system->GetChildCount(MEASURE);
+
+    const bool linesLimitHit = (maxLinesPerPage > 0) && (systemChildCount >= maxLinesPerPage);
+    const bool measuresLimitHit = (maxMeasuresPerPage > 0)
+        && (systemChildCount > 0)
+        && (m_measuresOnCurrentPage + measuresInSystem > maxMeasuresPerPage);
+
     if ((systemMaxPerPage && (systemMaxPerPage == systemChildCount))
+        || linesLimitHit
+        || measuresLimitHit
         || ((systemChildCount > 0)
             && (m_shift - system->GetDrawingYRel() + system->GetHeight() > this->GetAvailableDrawingHeight()))) {
         // If this is the last system in the list, it doesn't fit the page and it's a leftover system (has just one
@@ -369,6 +381,7 @@ FunctorCode CastOffPagesFunctor::VisitSystem(System *system)
         m_doc->GetPages()->AddChild(m_currentPage);
         m_shift = system->GetDrawingYRel();
         m_firstCastOffPage = false;
+        m_measuresOnCurrentPage = 0;
     }
 
     // First add all pending objects
@@ -384,6 +397,7 @@ FunctorCode CastOffPagesFunctor::VisitSystem(System *system)
     system = vrv_cast<System *>(m_contentPage->Relinquish(system->GetIdx()));
     assert(system);
     m_currentPage->AddChild(system);
+    m_measuresOnCurrentPage += measuresInSystem;
 
     return FUNCTOR_SIBLINGS;
 }

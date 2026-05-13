@@ -768,6 +768,8 @@ public:
     OptionDbl m_subBracketThickness;
     OptionIntMap m_systemDivider;
     OptionInt m_systemMaxPerPage;
+    OptionInt m_maxLinesPerPage;
+    OptionInt m_maxMeasuresPerPage;
     OptionDbl m_textEnclosureThickness;
     OptionDbl m_thickBarlineThickness;
     OptionDbl m_tieEndpointThickness;

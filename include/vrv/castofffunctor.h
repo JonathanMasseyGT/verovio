@@ -162,6 +162,8 @@ private:
     System *m_leftoverSystem;
     // The pending elements (Mdiv, Score) to be placed at the beginning of a page
     ArrayOfObjects m_pendingPageElements;
+    // Running total of measures placed on the current page (for maxMeasuresPerPage)
+    int m_measuresOnCurrentPage;
 };
 
 //----------------------------------------------------------------------------
