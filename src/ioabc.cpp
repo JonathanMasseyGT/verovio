@@ -172,6 +172,7 @@ void ABCInput::ParseABC(std::istream &infile)
     m_info.clear();
     m_title.clear();
 
+    m_doc->ExpandExpansions();
     m_doc->ConvertToPageBasedDoc();
 }
 
