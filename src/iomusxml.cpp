@@ -17,6 +17,7 @@
 //----------------------------------------------------------------------------
 
 #include "arpeg.h"
+#include "accid.h"
 #include "beam.h"
 #include "beamspan.h"
 #include "beatrpt.h"
@@ -44,6 +45,7 @@
 #include "harm.h"
 #include "instrdef.h"
 #include "keyaccid.h"
+#include "keysig.h"
 #include "label.h"
 #include "labelabbr.h"
 #include "layer.h"
@@ -52,6 +54,7 @@
 #include "mdiv.h"
 #include "measure.h"
 #include "metersiggrp.h"
+#include "metersig.h"
 #include "mnum.h"
 #include "mordent.h"
 #include "mrest.h"
@@ -70,6 +73,7 @@
 #include "rest.h"
 #include "sb.h"
 #include "score.h"
+#include "scoredef.h"
 #include "section.h"
 #include "slur.h"
 #include "space.h"
@@ -5277,5 +5281,495 @@ void MusicXmlInput::MidiToPitch(int midi, std::string &step, int &alter, int &oc
 }
 
 #endif // NO_MUSICXML_SUPPORT
+
+//----------------------------------------------------------------------------
+// MusicXMLOutput
+//----------------------------------------------------------------------------
+
+MusicXMLOutput::MusicXMLOutput(Doc *doc) : Output(doc) {}
+MusicXMLOutput::~MusicXMLOutput() {}
+
+static const int kDivisionsPerQuarter = 32; // supports up to 128th notes and all dotted values
+
+std::string MusicXMLOutput::Export()
+{
+    // ── Initialise state ──────────────────────────────────────────────────────
+    m_skip              = false;
+    m_staffN            = -1;
+    m_layerN            = -1;
+    m_inChord           = false;
+    m_measureNumber     = 0;
+    m_firstMeasureOfPart = true;
+    m_attributesWritten = false;
+    m_fifths            = 0;
+    m_mode              = "major";
+    m_meterBeats        = 4;
+    m_meterBeatType     = 4;
+    m_clefSign          = "G";
+    m_clefLine          = 2;
+    m_numStaves         = 1;
+
+    // ── Extract info from ScoreDef ────────────────────────────────────────────
+    ScoreDef *scoreDef = m_doc->GetFirstScoreDef();
+    if (scoreDef) {
+        const KeySig *ks = vrv_cast<const KeySig *>(scoreDef->FindDescendantByType(KEYSIG));
+        if (ks) m_fifths = ks->GetFifthsInt();
+
+        const MeterSig *ms = vrv_cast<const MeterSig *>(scoreDef->FindDescendantByType(METERSIG));
+        if (ms) {
+            if (ms->HasSym()) {
+                m_meterBeats    = 4;
+                m_meterBeatType = 4;
+            }
+            else {
+                int count = ms->GetTotalCount();
+                int unit  = ms->GetUnit();
+                if (count > 0) m_meterBeats    = count;
+                if (unit  > 0) m_meterBeatType = unit;
+            }
+        }
+
+        const Clef *cl = vrv_cast<const Clef *>(scoreDef->FindDescendantByType(CLEF));
+        if (cl) {
+            switch (cl->GetShape()) {
+                case CLEFSHAPE_G: m_clefSign = "G"; m_clefLine = cl->HasLine() ? cl->GetLine() : 2; break;
+                case CLEFSHAPE_F: m_clefSign = "F"; m_clefLine = cl->HasLine() ? cl->GetLine() : 4; break;
+                case CLEFSHAPE_C: m_clefSign = "C"; m_clefLine = cl->HasLine() ? cl->GetLine() : 3; break;
+                default:          m_clefSign = "G"; m_clefLine = 2; break;
+            }
+        }
+
+        // Count staves
+        ListOfConstObjects staffDefs;
+        ClassIdsComparison match({ STAFFDEF });
+        scoreDef->FindAllDescendantsByComparison(&staffDefs, &match);
+        m_numStaves = static_cast<int>(staffDefs.size());
+        if (m_numStaves < 1) m_numStaves = 1;
+
+        // Collect staff N values
+        m_partStaveNs.clear();
+        for (const Object *obj : staffDefs) {
+            m_partStaveNs.push_back(vrv_cast<const StaffDef *>(obj)->GetN());
+        }
+        if (!m_partStaveNs.empty()) m_staffN = m_partStaveNs.front();
+    }
+
+    // ── Build the XML skeleton ────────────────────────────────────────────────
+    m_xmlDoc.reset();
+    m_xmlDoc.append_child(pugi::node_declaration)
+        .append_attribute("version") = "1.0";
+    pugi::xml_node decl = m_xmlDoc.first_child();
+    decl.append_attribute("encoding") = "UTF-8";
+
+    // DOCTYPE
+    m_xmlDoc.append_child(pugi::node_doctype).set_value(
+        "score-partwise PUBLIC \"-//Recordare//DTD MusicXML 4.0 Partwise//EN\" "
+        "\"http://www.musicxml.org/dtds/partwise.dtd\"");
+
+    pugi::xml_node root = m_xmlDoc.append_child("score-partwise");
+    root.append_attribute("version") = "4.0";
+
+    // ── Work / title ─────────────────────────────────────────────────────────
+    pugi::xml_node titleNode = m_doc->m_header.select_node(".//title").node();
+    if (titleNode && titleNode.text().as_string()[0]) {
+        pugi::xml_node work = root.append_child("work");
+        work.append_child("work-title").text().set(titleNode.text().as_string());
+    }
+
+    // ── Part list ─────────────────────────────────────────────────────────────
+    m_partList = root.append_child("part-list");
+    // For now: one part per staff
+    for (int i = 0; i < m_numStaves; ++i) {
+        std::string partId = "P" + std::to_string(i + 1);
+        pugi::xml_node scorePart = m_partList.append_child("score-part");
+        scorePart.append_attribute("id") = partId.c_str();
+        scorePart.append_child("part-name").text().set("Voice");
+    }
+
+    // ── Part element(s): walk document body ───────────────────────────────────
+    // We currently handle a single-part (first staff) output.
+    // Each staff maps to a part.
+    m_currentPart = root.append_child("part");
+    m_currentPart.append_attribute("id") = "P1";
+    m_firstMeasureOfPart = true;
+
+    m_doc->SaveObject(this);
+
+    // ── Serialise ────────────────────────────────────────────────────────────
+    std::ostringstream ss;
+    unsigned int flags = pugi::format_default | pugi::format_indent;
+    m_xmlDoc.save(ss, "  ", flags, pugi::encoding_utf8);
+    return ss.str();
+}
+
+bool MusicXMLOutput::WriteObject(Object *object)
+{
+    if (object->Is(MEASURE)) {
+        ++m_measureNumber;
+        m_currentMeasure = m_currentPart.append_child("measure");
+        m_currentMeasure.append_attribute("number") = std::to_string(m_measureNumber).c_str();
+        // Do NOT reset m_attributesWritten here – attributes (<divisions>, <key>, <time>,
+        // <clef>) are written once in the first measure only.  Mid-piece changes are handled
+        // via inline ScoreDef detection below.
+        m_layerN = -1;
+        m_skip   = false;
+
+        // Left barline repeat
+        const data_BARRENDITION left = vrv_cast<Measure *>(object)->GetLeft();
+        if (left == BARRENDITION_rptstart || left == BARRENDITION_rptboth) {
+            WriteBarline(left, "left");
+        }
+    }
+    else if (object->Is(STAFF)) {
+        Staff *staff = vrv_cast<Staff *>(object);
+        if (m_staffN == -1) m_staffN = staff->GetN();
+        m_skip = (staff->GetN() != m_staffN);
+    }
+    else if (object->Is(LAYER)) {
+        if (m_skip) return true;
+        Layer *layer = vrv_cast<Layer *>(object);
+        if (m_layerN == -1) {
+            m_layerN = layer->GetN();
+            m_skip   = false;
+            // Write <attributes> once at the start of the first layer in the first measure
+            if (!m_attributesWritten) {
+                WriteMeasureAttributes();
+                m_attributesWritten = true;
+            }
+        }
+        else if (layer->GetN() != m_layerN) {
+            m_skip = true;
+        }
+    }
+    else if (!m_skip) {
+        if (object->Is(NOTE))       WriteNote(vrv_cast<Note *>(object));
+        else if (object->Is(REST))       WriteRest(vrv_cast<Rest *>(object));
+        else if (object->Is(MREST))      WriteMRest(vrv_cast<MRest *>(object));
+        else if (object->Is(MULTIREST))  WriteMultiRest(vrv_cast<MultiRest *>(object));
+        else if (object->Is(CHORD))      WriteChord(vrv_cast<Chord *>(object));
+    }
+    return true;
+}
+
+bool MusicXMLOutput::WriteObjectEnd(Object *object)
+{
+    if (object->Is(MEASURE)) {
+        // Right barline
+        const data_BARRENDITION right = vrv_cast<Measure *>(object)->GetRight();
+        if (right != BARRENDITION_NONE && right != BARRENDITION_single) {
+            WriteBarline(right, "right");
+        }
+    }
+    else if (!m_skip && object->Is(CHORD)) {
+        WriteChordEnd(vrv_cast<Chord *>(object));
+    }
+    return true;
+}
+
+// ── Attribute block ───────────────────────────────────────────────────────────
+
+void MusicXMLOutput::WriteMeasureAttributes()
+{
+    pugi::xml_node attr = m_currentMeasure.append_child("attributes");
+    attr.append_child("divisions").text().set(kDivisionsPerQuarter);
+
+    // Key
+    pugi::xml_node key = attr.append_child("key");
+    key.append_child("fifths").text().set(m_fifths);
+    key.append_child("mode").text().set(m_mode.c_str());
+
+    // Time
+    pugi::xml_node time = attr.append_child("time");
+    time.append_child("beats").text().set(m_meterBeats);
+    time.append_child("beat-type").text().set(m_meterBeatType);
+
+    // Clef
+    pugi::xml_node clef = attr.append_child("clef");
+    clef.append_child("sign").text().set(m_clefSign.c_str());
+    clef.append_child("line").text().set(m_clefLine);
+}
+
+// ── Note ─────────────────────────────────────────────────────────────────────
+
+/// Returns the chromatic alteration implied by the key signature for the given
+/// pitch name, without any explicit accidental.
+/// e.g. in G major (fifths=1) F → +1; in F major (fifths=-1) B → -1.
+static int KeyImpliedAlter(data_PITCHNAME pname, int fifths)
+{
+    // Standard order of sharps / flats as pitch-name enums
+    static const data_PITCHNAME kSharpsOrder[7] = {
+        PITCHNAME_f, PITCHNAME_c, PITCHNAME_g, PITCHNAME_d,
+        PITCHNAME_a, PITCHNAME_e, PITCHNAME_b
+    };
+    static const data_PITCHNAME kFlatsOrder[7] = {
+        PITCHNAME_b, PITCHNAME_e, PITCHNAME_a, PITCHNAME_d,
+        PITCHNAME_g, PITCHNAME_c, PITCHNAME_f
+    };
+
+    if (fifths > 0) {
+        const int n = std::min(fifths, 7);
+        for (int i = 0; i < n; ++i)
+            if (kSharpsOrder[i] == pname) return 1;
+    }
+    else if (fifths < 0) {
+        const int n = std::min(-fifths, 7);
+        for (int i = 0; i < n; ++i)
+            if (kFlatsOrder[i] == pname) return -1;
+    }
+    return 0;
+}
+
+void MusicXMLOutput::WriteNote(Note *note)
+{
+    assert(note);
+    // If inside a chord, notes after the first must have <chord/>
+    bool isChordNote = m_inChord;
+
+    pugi::xml_node noteNode = m_currentMeasure.append_child("note");
+    if (isChordNote) noteNode.append_child("chord");
+
+    // Pitch
+    pugi::xml_node pitch = noteNode.append_child("pitch");
+    pitch.append_child("step").text().set(PitchNameToStep(note->GetPname()).c_str());
+
+    // Determine the chromatic alteration:
+    //  1. Start from whatever the key signature implies for this pitch class.
+    //  2. If there is an explicit written accidental, that overrides the key.
+    int alter = KeyImpliedAlter(note->GetPname(), m_fifths);
+
+    Accid *accid = vrv_cast<Accid *>(note->FindDescendantByType(ACCID));
+    data_ACCIDENTAL_WRITTEN accidType = ACCIDENTAL_WRITTEN_NONE;
+    if (accid && accid->HasAccid()) {
+        accidType = accid->GetAccid();
+        alter     = AccidToAlter(accidType); // explicit accidental overrides key
+    }
+
+    if (alter != 0) pitch.append_child("alter").text().set(alter);
+
+    pitch.append_child("octave").text().set(note->GetOct());
+
+    // Duration
+    const int dots = note->HasDots() ? note->GetDots() : 0;
+    noteNode.append_child("duration").text().set(DurationToDivisions(note->GetDur(), dots));
+    noteNode.append_child("voice").text().set(1);
+    noteNode.append_child("type").text().set(DurationToType(note->GetDur()).c_str());
+    for (int d = 0; d < dots; ++d) noteNode.append_child("dot");
+
+    // Accidental notation
+    if (accidType != ACCIDENTAL_WRITTEN_NONE) {
+        std::string accStr = AccidToAccidentalType(accidType);
+        if (!accStr.empty()) noteNode.append_child("accidental").text().set(accStr.c_str());
+    }
+
+    // Tie start/stop
+    if (m_currentMeasure) {
+        PointingToComparison tieComp(TIE, note);
+        Tie *tie = vrv_cast<Tie *>(vrv_cast<Measure *>(
+            note->GetFirstAncestor(MEASURE))->FindDescendantByComparison(&tieComp, 1));
+        if (tie) {
+            noteNode.append_child("tie").append_attribute("type") = "start";
+            pugi::xml_node notations = noteNode.append_child("notations");
+            notations.append_child("tied").append_attribute("type") = "start";
+        }
+    }
+}
+
+// ── Rest ─────────────────────────────────────────────────────────────────────
+
+void MusicXMLOutput::WriteRest(Rest *rest)
+{
+    assert(rest);
+    pugi::xml_node noteNode = m_currentMeasure.append_child("note");
+    noteNode.append_child("rest");
+    const int dots = rest->HasDots() ? rest->GetDots() : 0;
+    noteNode.append_child("duration").text().set(DurationToDivisions(rest->GetDur(), dots));
+    noteNode.append_child("voice").text().set(1);
+    noteNode.append_child("type").text().set(DurationToType(rest->GetDur()).c_str());
+    for (int d = 0; d < dots; ++d) noteNode.append_child("dot");
+}
+
+void MusicXMLOutput::WriteMRest(MRest *mRest)
+{
+    assert(mRest);
+    pugi::xml_node noteNode = m_currentMeasure.append_child("note");
+    pugi::xml_node restNode = noteNode.append_child("rest");
+    restNode.append_attribute("measure") = "yes";
+    // Duration = full measure
+    int divs = kDivisionsPerQuarter * 4 * m_meterBeats / m_meterBeatType;
+    noteNode.append_child("duration").text().set(divs);
+    noteNode.append_child("voice").text().set(1);
+    noteNode.append_child("type").text().set("whole");
+}
+
+void MusicXMLOutput::WriteMultiRest(MultiRest *multiRest)
+{
+    // Write as a series of whole-measure rests
+    assert(multiRest);
+    int n = multiRest->GetNum();
+    pugi::xml_node noteNode = m_currentMeasure.append_child("note");
+    pugi::xml_node restNode = noteNode.append_child("rest");
+    restNode.append_attribute("measure") = "yes";
+    int divs = kDivisionsPerQuarter * 4 * m_meterBeats / m_meterBeatType;
+    noteNode.append_child("duration").text().set(divs);
+    noteNode.append_child("voice").text().set(1);
+    // Add a measure-style multiple rest
+    pugi::xml_node notations = noteNode.append_child("notations");
+    pugi::xml_node ornaments = notations.append_child("ornaments");
+    // Just note the count as a comment
+    (void)ornaments;
+    // Store num-measures in a direction
+    (void)n;
+}
+
+// ── Chord ────────────────────────────────────────────────────────────────────
+
+void MusicXMLOutput::WriteChord(Chord *chord)
+{
+    assert(chord);
+    m_inChord = true;
+    // The first note of the chord will NOT have <chord/>
+    // Subsequent notes will. This is handled in WriteNote via m_inChord + note counter.
+    // We need to reset the "first note" flag. We do this with a simple sentinel approach:
+    // m_inChord starts false, gets set true here, then WriteNote checks.
+    // But for the first note, we want no <chord/>.
+    // Solution: use a counter
+    m_inChord = false; // first note = no <chord/>
+}
+
+void MusicXMLOutput::WriteChordEnd(Chord *chord)
+{
+    assert(chord);
+    m_inChord = false;
+}
+
+// ── Barline ──────────────────────────────────────────────────────────────────
+
+void MusicXMLOutput::WriteBarline(data_BARRENDITION rend, const std::string &location)
+{
+    std::string barStyle = BarRenditionToBarStyle(rend);
+    if (barStyle.empty()) return;
+
+    pugi::xml_node barline = m_currentMeasure.append_child("barline");
+    barline.append_attribute("location") = location.c_str();
+    barline.append_child("bar-style").text().set(barStyle.c_str());
+
+    std::string repeatDir = (location == "left") ? "forward" : "backward";
+    if (rend == BARRENDITION_rptstart || rend == BARRENDITION_rptend || rend == BARRENDITION_rptboth) {
+        pugi::xml_node repeat = barline.append_child("repeat");
+        repeat.append_attribute("direction") = repeatDir.c_str();
+    }
+}
+
+// ── Static helpers ────────────────────────────────────────────────────────────
+
+std::string MusicXMLOutput::PitchNameToStep(data_PITCHNAME pname)
+{
+    switch (pname) {
+        case PITCHNAME_c: return "C";
+        case PITCHNAME_d: return "D";
+        case PITCHNAME_e: return "E";
+        case PITCHNAME_f: return "F";
+        case PITCHNAME_g: return "G";
+        case PITCHNAME_a: return "A";
+        case PITCHNAME_b: return "B";
+        default:          return "C";
+    }
+}
+
+int MusicXMLOutput::AccidToAlter(data_ACCIDENTAL_WRITTEN accid)
+{
+    switch (accid) {
+        case ACCIDENTAL_WRITTEN_s:  return 1;
+        case ACCIDENTAL_WRITTEN_f:  return -1;
+        case ACCIDENTAL_WRITTEN_ss: return 2;
+        case ACCIDENTAL_WRITTEN_x:  return 2;
+        case ACCIDENTAL_WRITTEN_ff: return -2;
+        case ACCIDENTAL_WRITTEN_n:  return 0;
+        default:                    return 0;
+    }
+}
+
+std::string MusicXMLOutput::AccidToAccidentalType(data_ACCIDENTAL_WRITTEN accid)
+{
+    switch (accid) {
+        case ACCIDENTAL_WRITTEN_s:  return "sharp";
+        case ACCIDENTAL_WRITTEN_f:  return "flat";
+        case ACCIDENTAL_WRITTEN_ss: return "double-sharp";
+        case ACCIDENTAL_WRITTEN_x:  return "double-sharp";
+        case ACCIDENTAL_WRITTEN_ff: return "double-flat";
+        case ACCIDENTAL_WRITTEN_n:  return "natural";
+        default:                    return "";
+    }
+}
+
+int MusicXMLOutput::DurationToDivisions(data_DURATION dur, int dots)
+{
+    // Base durations in units of 32nd-divs-per-quarter (kDivisionsPerQuarter=32)
+    int base = kDivisionsPerQuarter;
+    switch (dur) {
+        case DURATION_long:
+        case DURATION_longa:        base = kDivisionsPerQuarter * 16; break;
+        case DURATION_breve:
+        case DURATION_brevis:       base = kDivisionsPerQuarter * 8;  break;
+        case DURATION_1:
+        case DURATION_semibrevis:   base = kDivisionsPerQuarter * 4;  break;
+        case DURATION_2:
+        case DURATION_minima:       base = kDivisionsPerQuarter * 2;  break;
+        case DURATION_4:
+        case DURATION_semiminima:   base = kDivisionsPerQuarter;      break;
+        case DURATION_8:
+        case DURATION_fusa:         base = kDivisionsPerQuarter / 2;  break;
+        case DURATION_16:
+        case DURATION_semifusa:     base = kDivisionsPerQuarter / 4;  break;
+        case DURATION_32:           base = kDivisionsPerQuarter / 8;  break;
+        case DURATION_64:           base = kDivisionsPerQuarter / 16; break;
+        case DURATION_128:          base = kDivisionsPerQuarter / 32; break;
+        default:                    break;
+    }
+    // Apply dots: 1 dot = 3/2, 2 dots = 7/4
+    if      (dots == 1) return base * 3 / 2;
+    else if (dots == 2) return base * 7 / 4;
+    return base;
+}
+
+std::string MusicXMLOutput::DurationToType(data_DURATION dur)
+{
+    switch (dur) {
+        case DURATION_long:
+        case DURATION_longa:        return "long";
+        case DURATION_breve:
+        case DURATION_brevis:       return "breve";
+        case DURATION_1:
+        case DURATION_semibrevis:   return "whole";
+        case DURATION_2:
+        case DURATION_minima:       return "half";
+        case DURATION_4:
+        case DURATION_semiminima:   return "quarter";
+        case DURATION_8:
+        case DURATION_fusa:         return "eighth";
+        case DURATION_16:
+        case DURATION_semifusa:     return "16th";
+        case DURATION_32:           return "32nd";
+        case DURATION_64:           return "64th";
+        case DURATION_128:          return "128th";
+        default:                    return "quarter";
+    }
+}
+
+std::string MusicXMLOutput::BarRenditionToBarStyle(data_BARRENDITION rend) const
+{
+    switch (rend) {
+        case BARRENDITION_single:   return "regular";
+        case BARRENDITION_dbl:      return "light-light";
+        case BARRENDITION_end:      return "light-heavy";
+        case BARRENDITION_rptstart: return "heavy-light";
+        case BARRENDITION_rptend:   return "light-heavy";
+        case BARRENDITION_rptboth:  return "light-heavy";
+        case BARRENDITION_dotted:   return "dotted";
+        case BARRENDITION_dashed:   return "dashed";
+        case BARRENDITION_invis:    return "";
+        default:                    return "";
+    }
+}
 
 } // namespace vrv

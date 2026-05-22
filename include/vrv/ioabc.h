@@ -8,6 +8,7 @@
 #ifndef __VRV_IOABC_H__
 #define __VRV_IOABC_H__
 
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -166,6 +167,90 @@ private:
      * container for work entries
      */
     pugi::xml_node m_workList;
+};
+
+//----------------------------------------------------------------------------
+// Forward declarations for ABCOutput
+//----------------------------------------------------------------------------
+class Accid;
+class Chord;
+class GraceGrp;
+class MRest;
+class MultiRest;
+class Rest;
+class ScoreDef;
+class StaffDef;
+class Tuplet;
+
+//----------------------------------------------------------------------------
+// ABCOutput
+//----------------------------------------------------------------------------
+
+/**
+ * This class is a file output stream for writing ABC notation files.
+ * Unit note length is L:1/8 (eighth note).
+ */
+class ABCOutput : public Output {
+public:
+    ABCOutput(Doc *doc);
+    virtual ~ABCOutput();
+
+    /**
+     * The main Export method - returns the complete ABC string.
+     */
+    std::string Export() override;
+
+    /**
+     * @name WriteObject / WriteObjectEnd called during tree walk.
+     */
+    ///@{
+    bool WriteObject(Object *object) override;
+    bool WriteObjectEnd(Object *object) override;
+    ///@}
+
+private:
+    // ── Scordef / header collection ──────────────────────────────────────────
+    void WriteStaffDef(StaffDef *staffDef);
+    void WriteKeySig(KeySig *keySig);
+    void WriteMeterSig(MeterSig *meterSig);
+
+    // ── Body ─────────────────────────────────────────────────────────────────
+    void WriteMeasure(Measure *measure);
+    void WriteMeasureEnd(Measure *measure);
+    void WriteStaff(Staff *staff);
+    void WriteLayer(Layer *layer);
+    void WriteNote(Note *note);
+    void WriteRest(Rest *rest);
+    void WriteMRest(MRest *mRest);
+    void WriteMultiRest(MultiRest *multiRest);
+    void WriteChord(Chord *chord);
+    void WriteChordEnd(Chord *chord);
+    void WriteTuplet(Tuplet *tuplet);
+
+    // ── Helpers ───────────────────────────────────────────────────────────────
+    std::string PitchToABC(data_PITCHNAME pname, int oct) const;
+    std::string AccidToABC(data_ACCIDENTAL_WRITTEN accid) const;
+    std::string DurationToABC(data_DURATION dur, int dots) const;
+    std::string KeySigToABCKey(int count, data_ACCIDENTAL_WRITTEN type) const;
+    static int GCD(int a, int b);
+
+    std::ostringstream m_out;
+    bool m_docScoreDef; ///< True while processing the ScoreDef first-pass
+    bool m_skip;        ///< Skip non-primary staves / layers
+    int m_staffN;       ///< N of the first (primary) staff
+    int m_layerN;       ///< N of the first (primary) layer
+    bool m_inChord;     ///< Currently inside a Chord element
+    data_DURATION m_chordDur;
+    int m_chordDots;
+    Measure *m_currentMeasure;
+    bool m_firstMeasure;
+
+    // Collected header information
+    std::string m_title;
+    std::string m_key;
+    std::string m_meter;
+    int m_tempoNum;
+    bool m_hasTempo;
 };
 
 } // namespace vrv

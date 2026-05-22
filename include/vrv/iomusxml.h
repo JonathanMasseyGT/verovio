@@ -707,6 +707,80 @@ private:
 #endif // NO_MUSICXML_SUPPORT
 };
 
+class Chord;
+class MRest;
+class MultiRest;
+class Note;
+class Rest;
+class ScoreDef;
+class StaffDef;
+class Tie;
+class Tuplet;
+
+//----------------------------------------------------------------------------
+// MusicXMLOutput
+//----------------------------------------------------------------------------
+
+/**
+ * This class writes a verovio Doc tree back to MusicXML (score-partwise).
+ * It uses pugixml to build the document in memory.
+ * Divisions per quarter note = 32 (supports up to 128th notes and dotted values).
+ */
+class MusicXMLOutput : public Output {
+public:
+    MusicXMLOutput(Doc *doc);
+    virtual ~MusicXMLOutput();
+
+    std::string Export() override;
+    bool WriteObject(Object *object) override;
+    bool WriteObjectEnd(Object *object) override;
+
+private:
+    // ── Helpers ───────────────────────────────────────────────────────────────
+    static std::string PitchNameToStep(data_PITCHNAME pname);
+    static int AccidToAlter(data_ACCIDENTAL_WRITTEN accid);
+    static std::string AccidToAccidentalType(data_ACCIDENTAL_WRITTEN accid);
+    static int DurationToDivisions(data_DURATION dur, int dots); // at 32 div/qtr
+    static std::string DurationToType(data_DURATION dur);
+    std::string BarRenditionToBarStyle(data_BARRENDITION rend) const;
+
+    // ── Write methods ─────────────────────────────────────────────────────────
+    void WriteMeasureAttributes();
+    void WriteNote(Note *note);
+    void WriteRest(Rest *rest);
+    void WriteMRest(MRest *mRest);
+    void WriteMultiRest(MultiRest *multiRest);
+    void WriteChord(Chord *chord);
+    void WriteChordEnd(Chord *chord);
+    void WriteBarline(data_BARRENDITION rend, const std::string &location);
+
+    // ── State ─────────────────────────────────────────────────────────────────
+    pugi::xml_document m_xmlDoc;     ///< The output XML document
+    pugi::xml_node m_partList;       ///< <part-list>
+    pugi::xml_node m_currentPart;    ///< active <part>
+    pugi::xml_node m_currentMeasure; ///< active <measure>
+
+    bool m_skip;              ///< Skip non-primary staves / layers
+    int m_staffN;             ///< N of the first (primary) staff
+    int m_layerN;             ///< N of the first (primary) layer
+    bool m_inChord;           ///< Currently inside a Chord element
+    int m_measureNumber;      ///< 1-based measure counter
+    bool m_firstMeasureOfPart;
+
+    // Collected state from score def
+    int m_fifths;
+    std::string m_mode;
+    int m_meterBeats;
+    int m_meterBeatType;
+    std::string m_clefSign;
+    int m_clefLine;
+    bool m_attributesWritten;
+
+    // Per-measure data
+    int m_numStaves;
+    std::vector<int> m_partStaveNs; ///< staff N values mapped to part IDs
+};
+
 } // namespace vrv
 
 #endif // __VRV_IOMUSXML_H__

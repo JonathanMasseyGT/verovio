@@ -17,21 +17,25 @@
 
 //----------------------------------------------------------------------------
 
+#include "accid.h"
 #include "annot.h"
 #include "artic.h"
 #include "beam.h"
 #include "chord.h"
+#include "comparison.h"
 #include "doc.h"
 #include "dynam.h"
 #include "editorial.h"
 #include "fermata.h"
 #include "hairpin.h"
 #include "harm.h"
+#include "keysig.h"
 #include "layer.h"
 #include "mdiv.h"
 #include "measure.h"
 #include "metersig.h"
 #include "mordent.h"
+#include "mrest.h"
 #include "multirest.h"
 #include "note.h"
 #include "pb.h"
@@ -1815,5 +1819,340 @@ void ABCInput::ReadMusicCode(const std::string &musicCode, Section *section)
 }
 
 #endif /* NO_ABC_SUPPORT */
+
+//----------------------------------------------------------------------------
+// ABCOutput
+//----------------------------------------------------------------------------
+
+ABCOutput::ABCOutput(Doc *doc) : Output(doc) {}
+ABCOutput::~ABCOutput() {}
+
+std::string ABCOutput::Export()
+{
+    // Initialise state
+    m_docScoreDef = false;
+    m_skip = false;
+    m_staffN = -1;
+    m_layerN = -1;
+    m_inChord = false;
+    m_chordDur = DURATION_4;
+    m_chordDots = 0;
+    m_currentMeasure = nullptr;
+    m_firstMeasure = true;
+    m_title = "";
+    m_key = "C";
+    m_meter = "4/4";
+    m_tempoNum = 0;
+    m_hasTempo = false;
+
+    // ── First pass: extract header info from the ScoreDef ────────────────────
+    ScoreDef *scoreDef = m_doc->GetFirstScoreDef();
+    if (scoreDef) {
+        const MeterSig *ms = vrv_cast<const MeterSig *>(scoreDef->FindDescendantByType(METERSIG));
+        if (ms) {
+            if (ms->HasSym()) {
+                m_meter = (ms->GetSym() == METERSIGN_common) ? "C" : "C|";
+            }
+            else {
+                int count = ms->GetTotalCount();
+                int unit  = ms->GetUnit();
+                if (count > 0 && unit > 0) m_meter = std::to_string(count) + "/" + std::to_string(unit);
+            }
+        }
+        const KeySig *ks = vrv_cast<const KeySig *>(scoreDef->FindDescendantByType(KEYSIG));
+        if (ks) m_key = KeySigToABCKey(ks->GetAccidCount(), ks->GetAccidType());
+
+        const StaffDef *sd = vrv_cast<const StaffDef *>(scoreDef->FindDescendantByType(STAFFDEF));
+        if (sd) m_staffN = sd->GetN();
+    }
+
+    // ── Extract title from MEI header ─────────────────────────────────────────
+    pugi::xml_node titleNode = m_doc->m_header.select_node(".//title").node();
+    if (titleNode) m_title = titleNode.text().as_string();
+
+    // ── Write the ABC header ──────────────────────────────────────────────────
+    m_out.str("");
+    m_out.clear();
+    m_out << "X:1\n";
+    m_out << "T:" << m_title << "\n";
+    m_out << "M:" << m_meter << "\n";
+    m_out << "L:1/8\n";
+    if (m_hasTempo) m_out << "Q:" << m_tempoNum << "\n";
+    m_out << "K:" << m_key << "\n";
+
+    // If the document has encoded system-break (Sb) elements, tell ABC parsers
+    // that end-of-line characters in the body represent system breaks.  This
+    // corresponds to the ABC 2.1 directive:  I:linebreak <EOL>
+    if (m_doc->FindDescendantByType(SB) != nullptr) {
+        m_out << "I:linebreak <EOL>\n";
+    }
+
+    // ── Walk the document body ────────────────────────────────────────────────
+    m_doc->SaveObject(this);
+    m_out << "\n";
+
+    return m_out.str();
+}
+
+bool ABCOutput::WriteObject(Object *object)
+{
+    if (m_docScoreDef) return true; // not used
+
+    if (object->Is(MEASURE))    WriteMeasure(vrv_cast<Measure *>(object));
+    else if (object->Is(STAFF))      WriteStaff(vrv_cast<Staff *>(object));
+    else if (object->Is(LAYER))      WriteLayer(vrv_cast<Layer *>(object));
+    else if (object->Is(NOTE))       WriteNote(vrv_cast<Note *>(object));
+    else if (object->Is(REST))       WriteRest(vrv_cast<Rest *>(object));
+    else if (object->Is(MREST))      WriteMRest(vrv_cast<MRest *>(object));
+    else if (object->Is(MULTIREST))  WriteMultiRest(vrv_cast<MultiRest *>(object));
+    else if (object->Is(CHORD))      WriteChord(vrv_cast<Chord *>(object));
+    else if (object->Is(TUPLET))     WriteTuplet(vrv_cast<Tuplet *>(object));
+    else if (object->Is(SB))         m_out << "\n"; // encoded system break → ABC line break
+    return true;
+}
+
+bool ABCOutput::WriteObjectEnd(Object *object)
+{
+    if (object->Is(MEASURE)) WriteMeasureEnd(vrv_cast<Measure *>(object));
+    else if (object->Is(CHORD)) WriteChordEnd(vrv_cast<Chord *>(object));
+    return true;
+}
+
+// ── Body write methods ────────────────────────────────────────────────────────
+
+void ABCOutput::WriteMeasure(Measure *measure)
+{
+    assert(measure);
+    m_currentMeasure = measure;
+    m_layerN   = -1; // reset per measure so secondary layers are skipped
+    m_skip     = false;
+
+    // Left barline (repeat start)
+    const data_BARRENDITION left = measure->GetLeft();
+    if (!m_firstMeasure) {
+        // The right barline of the previous measure is written in WriteMeasureEnd,
+        // so here we only need to handle the start-repeat marker if present.
+    }
+    if (left == BARRENDITION_rptstart || left == BARRENDITION_rptboth) {
+        m_out << "|:";
+    }
+    m_firstMeasure = false;
+}
+
+void ABCOutput::WriteMeasureEnd(Measure *measure)
+{
+    assert(measure);
+    m_currentMeasure = nullptr;
+
+    const data_BARRENDITION right = measure->GetRight();
+    switch (right) {
+        case BARRENDITION_rptend:   m_out << ":|";  break;
+        case BARRENDITION_rptboth:  m_out << ":||:"; break;
+        case BARRENDITION_dbl:      m_out << "||";  break;
+        case BARRENDITION_end:      m_out << "|]";  break;
+        case BARRENDITION_invis:    /* no barline */ break;
+        default:                    m_out << "|";   break;
+    }
+}
+
+void ABCOutput::WriteStaff(Staff *staff)
+{
+    assert(staff);
+    if (m_staffN == -1) m_staffN = staff->GetN();
+    m_skip = (staff->GetN() != m_staffN);
+}
+
+void ABCOutput::WriteLayer(Layer *layer)
+{
+    assert(layer);
+    if (m_skip) return;
+    if (m_layerN == -1) { m_layerN = layer->GetN(); m_skip = false; }
+    else if (layer->GetN() != m_layerN) m_skip = true;
+}
+
+void ABCOutput::WriteNote(Note *note)
+{
+    assert(note);
+    if (m_skip) return;
+
+    // When inside a chord, skip notes that are NOT actually direct children
+    // of the Chord element we opened — they'll still be visited but we must
+    // not write their duration again (it was written on WriteChord).
+    if (m_inChord) {
+        // Inside []: write accidental + pitch only, no duration
+        Accid *accid = vrv_cast<Accid *>(note->FindDescendantByType(ACCID));
+        data_ACCIDENTAL_WRITTEN accidType = ACCIDENTAL_WRITTEN_NONE;
+        if (accid && accid->HasAccid()) accidType = accid->GetAccid();
+        m_out << AccidToABC(accidType);
+        m_out << PitchToABC(note->GetPname(), note->GetOct());
+        return;
+    }
+
+    // Stand-alone note: ABC format is [accidental][pitch][duration]
+    const int dots = note->HasDots() ? note->GetDots() : 0;
+
+    // Accidental
+    Accid *accid = vrv_cast<Accid *>(note->FindDescendantByType(ACCID));
+    data_ACCIDENTAL_WRITTEN accidType = ACCIDENTAL_WRITTEN_NONE;
+    if (accid && accid->HasAccid()) accidType = accid->GetAccid();
+    m_out << AccidToABC(accidType);
+
+    // Pitch
+    m_out << PitchToABC(note->GetPname(), note->GetOct());
+
+    // Duration comes after pitch in ABC notation
+    m_out << DurationToABC(note->GetDur(), dots);
+
+    // Tie (the '-' is appended right after the note letter in ABC)
+    if (m_currentMeasure) {
+        PointingToComparison tieComp(TIE, note);
+        Tie *tie = vrv_cast<Tie *>(m_currentMeasure->FindDescendantByComparison(&tieComp, 1));
+        if (tie) m_out << "-";
+    }
+}
+
+void ABCOutput::WriteRest(Rest *rest)
+{
+    assert(rest);
+    if (m_skip) return;
+    const int dots = rest->HasDots() ? rest->GetDots() : 0;
+    m_out << "z" << DurationToABC(rest->GetDur(), dots);
+}
+
+void ABCOutput::WriteMRest(MRest *mRest)
+{
+    assert(mRest);
+    if (m_skip) return;
+    m_out << "Z";
+}
+
+void ABCOutput::WriteMultiRest(MultiRest *multiRest)
+{
+    assert(multiRest);
+    if (m_skip) return;
+    m_out << "Z" << multiRest->GetNum();
+}
+
+void ABCOutput::WriteChord(Chord *chord)
+{
+    assert(chord);
+    if (m_skip) return;
+    m_inChord    = true;
+    m_chordDur   = chord->GetDur();
+    m_chordDots  = chord->HasDots() ? chord->GetDots() : 0;
+    m_out << "[";
+}
+
+void ABCOutput::WriteChordEnd(Chord *chord)
+{
+    assert(chord);
+    if (m_skip) return;
+    m_inChord = false;
+    m_out << "]";
+    m_out << DurationToABC(m_chordDur, m_chordDots);
+}
+
+void ABCOutput::WriteTuplet(Tuplet *tuplet)
+{
+    assert(tuplet);
+    if (m_skip) return;
+    m_out << "(" << tuplet->GetNum();
+}
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
+std::string ABCOutput::PitchToABC(data_PITCHNAME pname, int oct) const
+{
+    char letter = 'C';
+    switch (pname) {
+        case PITCHNAME_c: letter = 'C'; break;
+        case PITCHNAME_d: letter = 'D'; break;
+        case PITCHNAME_e: letter = 'E'; break;
+        case PITCHNAME_f: letter = 'F'; break;
+        case PITCHNAME_g: letter = 'G'; break;
+        case PITCHNAME_a: letter = 'A'; break;
+        case PITCHNAME_b: letter = 'B'; break;
+        default:          letter = 'C'; break;
+    }
+    std::string result;
+    // ABC octave conventions (Helmholtz / standard ABC):
+    //   'C'  with no modifiers = C4  (middle C)  uppercase, 4 - oct commas
+    //   'c'  with no modifiers = C5              lowercase, oct - 5 apostrophes
+    //   C,   = C3,  C,,  = C2, etc.
+    //   c'   = C6,  c''  = C7, etc.
+    if (oct >= 5) {
+        result += static_cast<char>(std::tolower(letter));
+        result += std::string(oct - 5, '\'');
+    }
+    else {
+        result += letter;
+        result += std::string(4 - oct, ',');
+    }
+    return result;
+}
+
+std::string ABCOutput::AccidToABC(data_ACCIDENTAL_WRITTEN accid) const
+{
+    switch (accid) {
+        case ACCIDENTAL_WRITTEN_s:  return "^";
+        case ACCIDENTAL_WRITTEN_f:  return "_";
+        case ACCIDENTAL_WRITTEN_ss: return "^^";
+        case ACCIDENTAL_WRITTEN_x:  return "^^";
+        case ACCIDENTAL_WRITTEN_ff: return "__";
+        case ACCIDENTAL_WRITTEN_n:  return "=";
+        default:                    return "";
+    }
+}
+
+// Duration relative to L:1/8 (eighth note = 1).
+// Returns the ABC duration modifier string.
+std::string ABCOutput::DurationToABC(data_DURATION dur, int dots) const
+{
+    int num = 1, den = 1;
+    switch (dur) {
+        case DURATION_long:
+        case DURATION_longa:        num = 32; break;
+        case DURATION_breve:
+        case DURATION_brevis:       num = 16; break;
+        case DURATION_1:
+        case DURATION_semibrevis:   num = 8;  break;
+        case DURATION_2:
+        case DURATION_minima:       num = 4;  break;
+        case DURATION_4:
+        case DURATION_semiminima:   num = 2;  break;
+        case DURATION_8:
+        case DURATION_fusa:         num = 1;  den = 1; break;
+        case DURATION_16:
+        case DURATION_semifusa:     num = 1;  den = 2; break;
+        case DURATION_32:           num = 1;  den = 4; break;
+        case DURATION_64:           num = 1;  den = 8; break;
+        case DURATION_128:          num = 1;  den = 16; break;
+        default:                    num = 2;  break;
+    }
+    if (dots == 1)      { num *= 3; den *= 2; }
+    else if (dots == 2) { num *= 7; den *= 4; }
+
+    int g = GCD(num, den);
+    num /= g; den /= g;
+
+    if (den == 1 && num == 1) return "";
+    if (den == 1) return std::to_string(num);
+    if (num == 1) return "/" + std::to_string(den);
+    return std::to_string(num) + "/" + std::to_string(den);
+}
+
+std::string ABCOutput::KeySigToABCKey(int count, data_ACCIDENTAL_WRITTEN type) const
+{
+    static const char *kSharps[] = { "C", "G", "D", "A", "E", "B", "F#", "C#" };
+    static const char *kFlats[]  = { "C", "F", "Bb", "Eb", "Ab", "Db", "Gb", "Cb" };
+    count = std::min(7, std::max(0, count));
+    return (type == ACCIDENTAL_WRITTEN_f) ? kFlats[count] : kSharps[count];
+}
+
+int ABCOutput::GCD(int a, int b)
+{
+    while (b) { int t = b; b = a % b; a = t; }
+    return a == 0 ? 1 : a;
+}
 
 } // namespace vrv
